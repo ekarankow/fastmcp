@@ -637,7 +637,10 @@ def _combine_schemas(route: HTTPRoute) -> dict[str, Any]:
 
 
 def _is_binary_string_schema(schema: dict[str, Any]) -> bool:
-    return schema.get("type") == "string" and schema.get("format") == "binary"
+    """File content: `format: binary` (OpenAPI 3.0) or `contentMediaType` (3.1)."""
+    return schema.get("type") == "string" and (
+        schema.get("format") == "binary" or "contentMediaType" in schema
+    )
 
 
 def extract_output_schema_from_responses(

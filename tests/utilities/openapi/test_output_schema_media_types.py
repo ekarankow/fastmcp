@@ -26,6 +26,15 @@ def _output_schema(content: dict[str, Any]) -> dict[str, Any] | None:
         pytest.param({"text/markdown": {"type": "string"}}, id="text"),
         pytest.param({"application/octet-stream": BINARY}, id="octet-stream"),
         pytest.param({"application/json": BINARY}, id="json-declared-binary"),
+        pytest.param(
+            {
+                "application/json": {
+                    "type": "string",
+                    "contentMediaType": "application/octet-stream",
+                }
+            },
+            id="json-declared-binary-3.1",
+        ),
     ],
 )
 def test_non_json_success_response_has_no_output_schema(content: dict[str, Any]):
