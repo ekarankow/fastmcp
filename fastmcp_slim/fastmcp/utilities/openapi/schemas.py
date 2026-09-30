@@ -636,6 +636,10 @@ def _combine_schemas(route: HTTPRoute) -> dict[str, Any]:
     return schema
 
 
+def _is_binary_string_schema(schema: dict[str, Any]) -> bool:
+    return schema.get("type") == "string" and schema.get("format") == "binary"
+
+
 def extract_output_schema_from_responses(
     responses: dict[str, ResponseInfo],
     schema_definitions: dict[str, Any] | None = None,
@@ -646,7 +650,8 @@ def extract_output_schema_from_responses(
 
     This function finds the first successful response (200, 201, 202, 204) with a
     JSON-compatible content type and extracts its schema. If the schema is not an
-    object type, it wraps it to comply with MCP requirements.
+    object type, it wraps it to comply with MCP requirements. Responses without a
+    JSON body (files, text) get no output schema.
 
     Args:
         responses: Dictionary of ResponseInfo objects keyed by status code
@@ -694,15 +699,17 @@ def extract_output_schema_from_responses(
             schema = response_info.content_schema[content_type]
             break
 
-    # If no JSON-compatible type found, try the first available content type
-    if schema is None and response_info.content_schema:
-        first_content_type = next(iter(response_info.content_schema))
-        schema = response_info.content_schema[first_content_type]
-        logger.debug(
-            f"Using non-JSON content type for output schema: {first_content_type}"
-        )
+    # Any other structured-syntax JSON type (e.g. application/vnd.acme+json)
+    if schema is None:
+        for content_type, content_schema in response_info.content_schema.items():
+            if content_type.split(";")[0].strip().lower().endswith("+json"):
+                schema = content_schema
+                break
 
-    if not schema or not isinstance(schema, dict):
+    # Non-JSON bodies (files, text) are returned as content blocks rather than
+    # structured output, so they get no output schema. A JSON media type whose
+    # schema is a binary string describes file content, not a JSON document.
+    if not schema or not isinstance(schema, dict) or _is_binary_string_schema(schema):
         return None
 
     # Convert refs if needed

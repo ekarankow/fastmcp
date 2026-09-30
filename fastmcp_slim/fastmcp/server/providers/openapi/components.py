@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 from typing import TYPE_CHECKING, Any
 
 import httpx2
-from mcp_types import ToolAnnotations
+from mcp_types import (
+    AudioContent,
+    BlobResourceContents,
+    EmbeddedResource,
+    ImageContent,
+    ToolAnnotations,
+)
 from pydantic.networks import AnyUrl
 
 from fastmcp.resources import (
@@ -234,37 +241,118 @@ class OpenAPITool(Tool):
 
             response = await _send_request(self._client, request)
             _raise_for_status(response)
-
-            # Try to parse as JSON first
-            try:
-                result = response.json()
-
-                # Handle structured content based on output schema
-                if self.output_schema is not None:
-                    if self.output_schema.get("x-fastmcp-wrap-result"):
-                        structured_output = {"result": result}
-                    else:
-                        structured_output = result
-                elif not isinstance(result, dict):
-                    structured_output = {"result": result}
-                else:
-                    structured_output = result
-
-                # Structured content must be a dict for the MCP protocol.
-                # Wrap non-dict values that slipped through (e.g. a backend
-                # returning an array when the schema declared an object).
-                if not isinstance(structured_output, dict):
-                    structured_output = {"result": structured_output}
-
-                return ToolResult(structured_content=structured_output)
-            except json.JSONDecodeError:
-                return ToolResult(content=response.text)
+            return self._build_result(response)
 
         except httpx2.TimeoutException as exc:
             raise ValueError(f"HTTP request timed out ({type(exc).__name__})") from exc
 
         except httpx2.RequestError as exc:
             raise ValueError(f"Request error ({type(exc).__name__}): {exc!s}") from exc
+
+    def _build_result(self, response: httpx2.Response) -> ToolResult:
+        """Convert a successful response into a tool result.
+
+        JSON bodies become structured content. Other bodies are returned as text
+        when they are text, and as base64 image, audio, or blob content otherwise.
+        """
+        wrap_result = bool(
+            self.output_schema and self.output_schema.get("x-fastmcp-wrap-result")
+        )
+        try:
+            result = response.json()
+        except ValueError:
+            # Not JSON: JSONDecodeError, or UnicodeDecodeError for binary bodies.
+            pass
+        else:
+            return ToolResult(structured_content=self._structure_json(result))
+
+        media_type = _response_media_type(response)
+        text = _decode_text_body(response, media_type)
+        if text is not None:
+            return ToolResult(
+                content=text,
+                structured_content={"result": text} if wrap_result else None,
+            )
+
+        data = base64.b64encode(response.content).decode("ascii")
+        mime_type = media_type or "application/octet-stream"
+        return ToolResult(
+            content=[_binary_content(response, data, mime_type)],
+            structured_content={"result": data} if wrap_result else None,
+        )
+
+    def _structure_json(self, result: Any) -> dict[str, Any]:
+        # Handle structured content based on output schema
+        if self.output_schema is not None:
+            if self.output_schema.get("x-fastmcp-wrap-result"):
+                structured_output = {"result": result}
+            else:
+                structured_output = result
+        elif not isinstance(result, dict):
+            structured_output = {"result": result}
+        else:
+            structured_output = result
+
+        # Structured content must be a dict for the MCP protocol.
+        # Wrap non-dict values that slipped through (e.g. a backend
+        # returning an array when the schema declared an object).
+        if not isinstance(structured_output, dict):
+            structured_output = {"result": structured_output}
+        return structured_output
+
+
+# Media types that say nothing about the body; such bodies are checked for text.
+_UNTYPED_MEDIA_TYPES = frozenset({"", "application/octet-stream"})
+
+_TEXT_MEDIA_TYPES = frozenset(
+    {
+        "application/xml",
+        "application/yaml",
+        "application/x-yaml",
+        "application/javascript",
+        "application/x-ndjson",
+    }
+)
+
+
+def _response_media_type(response: httpx2.Response) -> str:
+    return response.headers.get("content-type", "").split(";")[0].strip().lower()
+
+
+def _decode_text_body(response: httpx2.Response, media_type: str) -> str | None:
+    """Return the body as text when it is text, or None when it is binary."""
+    if (
+        media_type.startswith("text/")
+        or media_type in _TEXT_MEDIA_TYPES
+        or media_type.endswith(("+xml", "+yaml"))
+    ):
+        try:
+            return response.content.decode(response.encoding or "utf-8")
+        except (UnicodeDecodeError, LookupError):
+            return None
+    if media_type in _UNTYPED_MEDIA_TYPES:
+        # Files are often served untyped; strict UTF-8 without NUL bytes is text.
+        try:
+            text = response.content.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+        return None if "\x00" in text else text
+    return None
+
+
+def _binary_content(
+    response: httpx2.Response, data: str, mime_type: str
+) -> ImageContent | AudioContent | EmbeddedResource:
+    if mime_type.startswith("image/"):
+        return ImageContent(type="image", data=data, mime_type=mime_type)
+    if mime_type.startswith("audio/"):
+        return AudioContent(type="audio", data=data, mime_type=mime_type)
+    # The query string is dropped: it may carry values that should not be echoed.
+    uri = str(response.request.url.copy_with(query=None, fragment=None))
+    return EmbeddedResource(
+        type="resource",
+        resource=BlobResourceContents(uri=uri, mime_type=mime_type, blob=data),
+    )
 
 
 class OpenAPIResource(Resource):

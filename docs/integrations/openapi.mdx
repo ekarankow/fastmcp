@@ -488,3 +488,14 @@ await client.call_tool("create_pet", {
 The discriminator stays required; every variant field is optional, because only one variant applies to any given call.
 
 This trades local strictness for a schema models complete accurately. The generated schema permits any combination of variant fields, so sending `packSize` with `petType: "cat"` passes FastMCP's validation and is rejected by the API itself, exactly as it would be for any other HTTP client. Where two variants declare the same field differently, the declarations are combined with `anyOf` so that neither variant's constraints are advertised as applying to both.
+
+## Response Handling
+
+A tool returns a successful response according to its body. JSON bodies become structured content, validated against the output schema derived from the operation's success response. Text bodies (`text/*`, XML, YAML) are returned as text. Images and audio are returned as image and audio content, and any other binary body, such as a ZIP archive or PDF, as an embedded resource with base64 data and the response's media type. A body served as `application/octet-stream` or without a `Content-Type` is returned as text when it is valid UTF-8, and as binary otherwise.
+
+Only operations whose success response declares a JSON document get an output schema. Operations that return files or text don't, and neither do operations that describe a JSON response as `type: string, format: binary`, since that describes file content rather than a JSON document.
+
+```python
+result = await client.call_tool("download_report", {"report_id": "q3"})
+# result.content[0] is an EmbeddedResource whose blob holds the base64-encoded file
+```
